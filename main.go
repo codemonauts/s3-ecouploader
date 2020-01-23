@@ -122,10 +122,19 @@ func main() {
 		log.Info("Will force upload every file due to -force flag")
 	}
 
+	if _, err := os.Stat(FOLDER); os.IsNotExist(err) {
+		log.Fatalf("The folder %q doesn't exists", FOLDER)
+	}
+
 	log.Info("Creating S3 session")
 	SESS = session.Must(session.NewSession(&aws.Config{
 		Region: aws.String(REGION),
 	}))
+
+	values, _ := SESS.Config.Credentials.Get()
+	if !values.HasKeys() {
+		log.Fatal("Can't find valid AWS credentials")
+	}
 
 	log.Info("Creating S3 upload manager")
 	UPLOADER = s3manager.NewUploader(SESS, func(u *s3manager.Uploader) {
