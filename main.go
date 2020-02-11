@@ -2,9 +2,11 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	log "github.com/sirupsen/logrus"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -23,7 +25,8 @@ var (
 	UPLOADER *s3manager.Uploader
 	BUCKET   string
 	REGION   string
-	FOLDER   string
+	SRC      string
+	DEST     string
 )
 
 func getS3ETag(key string) (string, error) {
@@ -42,18 +45,25 @@ func getS3ETag(key string) (string, error) {
 	}
 }
 
+func buildRemotePath(path string, src string, dest string) string {
+	relativePath := strings.Replace(path, src, "", 1)
+	remotePath := fmt.Sprintf("%s%s", dest, relativePath)
+	return remotePath
+}
+
 func handler(path string, f os.FileInfo, err error, force bool) error {
 	if !f.IsDir() { // Only check files
+		remotePath := buildRemotePath(path, SRC, DEST)
 		if force {
-			uploadFile(path)
+			uploadFile(path, remotePath)
 			return nil
 		}
 
 		log.Info(path)
-		s3Hash, err := getS3ETag(path)
+		s3Hash, err := getS3ETag(remotePath)
 		if err != nil {
 			log.Debug("File doesn't exists in S3 -> Uploading")
-			uploadFile(path)
+			uploadFile(path, remotePath)
 			return nil
 		}
 
@@ -72,29 +82,29 @@ func handler(path string, f os.FileInfo, err error, force bool) error {
 				"s3Hash":    s3Hash,
 				"localHash": localHash,
 			}).Debug("File changed -> Uploading.")
-			uploadFile(path)
+			uploadFile(path, remotePath)
 		}
 	}
 	return nil
 }
 
-func uploadFile(path string) {
+func uploadFile(path string, remotePath string) {
 	log.Info("Uploading ", path)
 	f, err := os.Open(path)
 	defer f.Close()
 	if err != nil {
-		log.Error("failed to open file %q, %v", path, err)
+		log.Errorf("failed to open file %q, %v", path, err)
 		return
 	}
 
 	// Upload the file to S3.
 	uploadRes, err := UPLOADER.Upload(&s3manager.UploadInput{
 		Bucket: aws.String(BUCKET),
-		Key:    aws.String(path),
+		Key:    aws.String(remotePath),
 		Body:   f,
 	})
 	if err != nil {
-		log.Error("failed to upload file, %v", err)
+		log.Errorf("failed to upload file, %v", err)
 		return
 	}
 	log.Debugf("File uploaded to %s\n", uploadRes.Location)
@@ -103,13 +113,14 @@ func uploadFile(path string) {
 func main() {
 	flag.StringVar(&BUCKET, "bucket", "", "Destination S3 Bucket")
 	flag.StringVar(&REGION, "region", "", "Region of the S3 Bucket")
-	flag.StringVar(&FOLDER, "folder", "", "Local folder to backup")
+	flag.StringVar(&SRC, "src", "", "Local folder to backup")
+	flag.StringVar(&DEST, "dest", "", "Remote prefix for S3")
 	forcePtr := flag.Bool("force", false, "Skip hashing and upload all files")
 	debugPtr := flag.Bool("debug", false, "Enable debug logging")
 	flag.Parse()
 
-	if BUCKET == "" || REGION == "" || FOLDER == "" {
-		log.Fatal("bucket, region and folder are all required parameters")
+	if BUCKET == "" || REGION == "" || SRC == "" {
+		log.Fatal("bucket, region and src are all required parameters")
 	}
 
 	if *debugPtr {
@@ -122,8 +133,8 @@ func main() {
 		log.Info("Will force upload every file due to -force flag")
 	}
 
-	if _, err := os.Stat(FOLDER); os.IsNotExist(err) {
-		log.Fatalf("The folder %q doesn't exists", FOLDER)
+	if _, err := os.Stat(SRC); os.IsNotExist(err) {
+		log.Fatalf("The folder %q doesn't exists", SRC)
 	}
 
 	log.Info("Creating S3 session")
@@ -141,8 +152,8 @@ func main() {
 		u.PartSize = CHUNK * BYTESINMB
 	})
 
-	log.Infof("Starting to scan %q\n", FOLDER)
-	err := filepath.Walk(FOLDER, func(path string, info os.FileInfo, err error) error {
+	log.Infof("Starting to scan %q\n", SRC)
+	err := filepath.Walk(SRC, func(path string, info os.FileInfo, err error) error {
 		return handler(path, info, err, *forcePtr)
 	})
 	if err != nil {
