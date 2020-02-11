@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
@@ -15,20 +16,44 @@ import (
 	"github.com/peak/s3hash"
 )
 
+type Statistics struct {
+	Start     time.Time
+	End       time.Time
+	Duration  time.Duration
+	FileCount int
+	New       int
+	Changed   int
+}
+
 const (
 	CHUNK     = 5
 	BYTESINMB = 1024 * 1024
 )
 
 var (
-	SESS     *session.Session
-	UPLOADER *s3manager.Uploader
-	BUCKET   string
-	REGION   string
-	SRC      string
-	DEST     string
+	SESS       *session.Session
+	UPLOADER   *s3manager.Uploader
+	BUCKET     string
+	REGION     string
+	SRC        string
+	DEST       string
+	STATISTICS Statistics
 )
 
+func printStatistics() {
+	skipped := (STATISTICS.FileCount) - ((STATISTICS.Changed) + (STATISTICS.New))
+
+	fmt.Println("##############################")
+	fmt.Printf("Start Time: %s\n", STATISTICS.Start.Format(time.RFC3339))
+	fmt.Printf("  End Time: %s\n", STATISTICS.End.Format(time.RFC3339))
+	fmt.Printf("  Duration: %s\n", STATISTICS.Duration)
+	fmt.Println("")
+	fmt.Printf("  Total File Count: %d\n", STATISTICS.FileCount)
+	fmt.Printf("    Uploaded (New): %d\n", STATISTICS.New)
+	fmt.Printf("Uploaded (Changed): %d\n", STATISTICS.Changed)
+	fmt.Printf("           Skipped: %d\n", skipped)
+	fmt.Println("##############################")
+}
 func getS3ETag(key string) (string, error) {
 	log.Debugf("Checking if %q exists in S3", key)
 	svc := s3.New(SESS)
@@ -53,6 +78,7 @@ func buildRemotePath(path string, src string, dest string) string {
 
 func handler(path string, f os.FileInfo, err error, force bool) error {
 	if !f.IsDir() { // Only check files
+		STATISTICS.FileCount++
 		remotePath := buildRemotePath(path, SRC, DEST)
 		if force {
 			uploadFile(path, remotePath)
@@ -63,6 +89,7 @@ func handler(path string, f os.FileInfo, err error, force bool) error {
 		s3Hash, err := getS3ETag(remotePath)
 		if err != nil {
 			log.Debug("File doesn't exists in S3 -> Uploading")
+			STATISTICS.New++
 			uploadFile(path, remotePath)
 			return nil
 		}
@@ -82,6 +109,7 @@ func handler(path string, f os.FileInfo, err error, force bool) error {
 				"s3Hash":    s3Hash,
 				"localHash": localHash,
 			}).Debug("File changed -> Uploading.")
+			STATISTICS.Changed++
 			uploadFile(path, remotePath)
 		}
 	}
@@ -153,12 +181,17 @@ func main() {
 	})
 
 	log.Infof("Starting to scan %q\n", SRC)
+	STATISTICS.Start = time.Now()
+
 	err := filepath.Walk(SRC, func(path string, info os.FileInfo, err error) error {
 		return handler(path, info, err, *forcePtr)
 	})
 	if err != nil {
 		log.Fatal(err)
 	}
+	STATISTICS.End = time.Now()
+	STATISTICS.Duration = time.Since(STATISTICS.Start)
 	log.Info("Finished")
 
+	printStatistics()
 }
