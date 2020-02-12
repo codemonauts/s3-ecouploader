@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	log "github.com/sirupsen/logrus"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,42 +78,47 @@ func buildRemotePath(path string, src string, dest string) string {
 	return remotePath
 }
 
+func checkFile(path string, force bool) error {
+	STATISTICS.FileCount++
+	remotePath := buildRemotePath(path, SRC, DEST)
+	if force {
+		uploadFile(path, remotePath)
+		return nil
+	}
+
+	log.Info(path)
+	s3Hash, err := getS3ETag(remotePath)
+	if err != nil {
+		log.Debug("File doesn't exists in S3 -> Uploading")
+		STATISTICS.New++
+		uploadFile(path, remotePath)
+		return nil
+	}
+
+	localHash, err := s3hash.CalculateForFile(path, int64(CHUNK*BYTESINMB))
+	if err != nil {
+		return err
+	}
+
+	// Strip quotes from string
+	s3Hash = s3Hash[1 : len(s3Hash)-1]
+
+	if s3Hash == localHash {
+		log.Debug("File didn't changed -> Skipping")
+	} else {
+		log.WithFields(log.Fields{
+			"s3Hash":    s3Hash,
+			"localHash": localHash,
+		}).Debug("File changed -> Uploading.")
+		STATISTICS.Changed++
+		uploadFile(path, remotePath)
+	}
+	return nil
+}
+
 func handler(path string, f os.FileInfo, err error, force bool) error {
 	if !f.IsDir() { // Only check files
-		STATISTICS.FileCount++
-		remotePath := buildRemotePath(path, SRC, DEST)
-		if force {
-			uploadFile(path, remotePath)
-			return nil
-		}
-
-		log.Info(path)
-		s3Hash, err := getS3ETag(remotePath)
-		if err != nil {
-			log.Debug("File doesn't exists in S3 -> Uploading")
-			STATISTICS.New++
-			uploadFile(path, remotePath)
-			return nil
-		}
-
-		localHash, err := s3hash.CalculateForFile(path, int64(CHUNK*BYTESINMB))
-		if err != nil {
-			return err
-		}
-
-		// Strip quotes from string
-		s3Hash = s3Hash[1 : len(s3Hash)-1]
-
-		if s3Hash == localHash {
-			log.Debug("File didn't changed -> Skipping")
-		} else {
-			log.WithFields(log.Fields{
-				"s3Hash":    s3Hash,
-				"localHash": localHash,
-			}).Debug("File changed -> Uploading.")
-			STATISTICS.Changed++
-			uploadFile(path, remotePath)
-		}
+		return checkFile(path, force)
 	}
 	return nil
 }
@@ -183,12 +190,46 @@ func main() {
 	log.Infof("Starting to scan %q\n", SRC)
 	STATISTICS.Start = time.Now()
 
-	err := filepath.Walk(SRC, func(path string, info os.FileInfo, err error) error {
-		return handler(path, info, err, *forcePtr)
-	})
+	info, err := os.Stdin.Stat()
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
+
+	var fileList []string
+	if info.Mode()&os.ModeCharDevice == 0 || info.Size() > 0 {
+		reader := bufio.NewReader(os.Stdin)
+
+		for {
+			line, _, e := reader.ReadLine()
+			if e != nil && e == io.EOF {
+				break
+			}
+			fileList = append(fileList, string(line))
+		}
+	}
+
+	if len(fileList) > 0 {
+		log.Infof("Got %d files from stdin. Starting to check them\n", len(fileList))
+		for _, path := range fileList {
+			fi, err := os.Stat(path)
+			if err != nil {
+				log.Errorf("failed to open file %q, %v", path, err)
+				continue
+			}
+			if !fi.IsDir() {
+				checkFile(path, *forcePtr)
+			}
+		}
+	} else {
+		log.Infof("Got no file list from stdin. Starting to walk %q\n", SRC)
+		err = filepath.Walk(SRC, func(path string, info os.FileInfo, err error) error {
+			return handler(path, info, err, *forcePtr)
+		})
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
 	STATISTICS.End = time.Now()
 	STATISTICS.Duration = time.Since(STATISTICS.Start)
 	log.Info("Finished")
