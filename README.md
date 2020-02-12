@@ -23,6 +23,8 @@ The tool will read it's credentials from the default awscli config file located 
         Enable debug logging
   -force
         Skip hashing and upload all files
+  -stdin
+        Read a list of files from stdin
 ```
 
 ## Optimize runtime for very big folders
@@ -31,7 +33,7 @@ don't need to be processed by this tool. One can now use `find` to get a list of
 ago. This way the amount of files which have to be processed by this tool drops significantly. We run our backup
 scripts every night and start the script like this:
 ```
-find /mnt/data -mtime -2 -type f | ./s3-ecouploader ....
+find /mnt/data -mtime -2 -type f | ./s3-ecouploader -stdin ....
 ```
 This command will process all files (`-type f`) which have a modification timestamp (`mtime`) between now and two days ago
 (`-2`).

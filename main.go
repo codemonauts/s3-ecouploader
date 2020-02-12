@@ -145,6 +145,28 @@ func uploadFile(path string, remotePath string) {
 	log.Debugf("File uploaded to %s\n", uploadRes.Location)
 }
 
+func readStdin() []string {
+	var fileList []string
+
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		panic(err)
+	}
+
+	if info.Mode()&os.ModeCharDevice == 0 || info.Size() > 0 {
+		reader := bufio.NewReader(os.Stdin)
+
+		for {
+			line, _, err := reader.ReadLine()
+			if err != nil && err == io.EOF {
+				break
+			}
+			fileList = append(fileList, string(line))
+		}
+	}
+	return fileList
+}
+
 func main() {
 	flag.StringVar(&BUCKET, "bucket", "", "Destination S3 Bucket")
 	flag.StringVar(&REGION, "region", "", "Region of the S3 Bucket")
@@ -152,6 +174,7 @@ func main() {
 	flag.StringVar(&DEST, "dest", "", "Remote prefix for S3")
 	forcePtr := flag.Bool("force", false, "Skip hashing and upload all files")
 	debugPtr := flag.Bool("debug", false, "Enable debug logging")
+	stdinPtr := flag.Bool("stdin", false, "Read a list of files from stdin")
 	flag.Parse()
 
 	if BUCKET == "" || REGION == "" || SRC == "" {
@@ -187,47 +210,34 @@ func main() {
 		u.PartSize = CHUNK * BYTESINMB
 	})
 
-	log.Infof("Starting to scan %q\n", SRC)
 	STATISTICS.Start = time.Now()
 
-	info, err := os.Stdin.Stat()
-	if err != nil {
-		panic(err)
-	}
-
-	var fileList []string
-	if info.Mode()&os.ModeCharDevice == 0 || info.Size() > 0 {
-		reader := bufio.NewReader(os.Stdin)
-
-		for {
-			line, _, e := reader.ReadLine()
-			if e != nil && e == io.EOF {
-				break
+	if *stdinPtr {
+		fileList := readStdin()
+		if len(fileList) > 0 {
+			log.Infof("Got %d files from stdin. Starting to check them\n", len(fileList))
+			for _, path := range fileList {
+				fi, err := os.Stat(path)
+				if err != nil {
+					log.Errorf("failed to open file %q, %v", path, err)
+					continue
+				}
+				if !fi.IsDir() {
+					checkFile(path, *forcePtr)
+				}
 			}
-			fileList = append(fileList, string(line))
-		}
-	}
-
-	if len(fileList) > 0 {
-		log.Infof("Got %d files from stdin. Starting to check them\n", len(fileList))
-		for _, path := range fileList {
-			fi, err := os.Stat(path)
-			if err != nil {
-				log.Errorf("failed to open file %q, %v", path, err)
-				continue
-			}
-			if !fi.IsDir() {
-				checkFile(path, *forcePtr)
-			}
+		} else {
+			log.Warn("File list from stdin was empty")
 		}
 	} else {
-		log.Infof("Got no file list from stdin. Starting to walk %q\n", SRC)
-		err = filepath.Walk(SRC, func(path string, info os.FileInfo, err error) error {
+		log.Infof("Starting to scan %q\n", SRC)
+		err := filepath.Walk(SRC, func(path string, info os.FileInfo, err error) error {
 			return handler(path, info, err, *forcePtr)
 		})
 		if err != nil {
 			log.Fatal(err)
 		}
+
 	}
 
 	STATISTICS.End = time.Now()
